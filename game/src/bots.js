@@ -1,8 +1,13 @@
-// Enemy bots: four rivals that patrol routes, hold sites, see and hear. A bot walks its
-// waypoints, pauses to hold, and reacts to what it sees and hears: a player in its view
-// cone with a clear line of sight draws aimed bursts; a gunshot or explosion within earshot
-// pulls it to investigate; a planted bomb pulls every living bot to the site, where the
-// nearest one defuses. No allocations in the step loop: one raycaster, one tracer pool.
+// Enemy bots: four humanoid rivals that patrol routes, hold sites, see and hear.
+// Each rival is built as a person, not a box: capsule legs with boots that walk,
+// a tapered torso with a vest, belt and shoulder pads, a skinned head under a
+// helmet dome with goggles, and two arms that carry a rifle — the rifle rises to
+// aim when the bot spots the player and lowers to a carry when it patrols. A bot
+// walks its waypoints, pauses to hold, and reacts to what it sees and hears: a
+// player in its view cone with a clear line of sight draws aimed bursts; a gunshot
+// or explosion within earshot pulls it to investigate; a planted bomb pulls every
+// living bot to the site, where the nearest one defuses. No allocations in the
+// step loop: one raycaster, one tracer pool.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 import { WAYPOINTS, BOT_SPAWNS } from './map.js';
@@ -26,6 +31,7 @@ const _from = new THREE.Vector3();
 const _to = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 const _flat = new THREE.Vector3();
+const _up = new THREE.Vector3(0, 1, 0);
 
 export function createBots(scene, world, random) {
   const raycaster = new THREE.Raycaster();
@@ -35,12 +41,8 @@ export function createBots(scene, world, random) {
 
   const bodyMaterial = new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.enemy), roughness: 0.6, metalness: 0.05 });
   const darkMaterial = new THREE.MeshStandardMaterial({ color: new THREE.Color('#23252b'), roughness: 0.85 });
+  const skinMaterial = new THREE.MeshStandardMaterial({ color: new THREE.Color('#c89878'), roughness: 0.7 });
   const visorMaterial = new THREE.MeshStandardMaterial({ color: new THREE.Color(PALETTE.accent), roughness: 0.4, emissive: new THREE.Color(PALETTE.accent), emissiveIntensity: 0.6 });
-  const torsoGeometry = new THREE.BoxGeometry(0.52, 0.78, 0.3);
-  const headGeometry = new THREE.SphereGeometry(0.155, 16, 12);
-  const legGeometry = new THREE.BoxGeometry(0.18, 0.72, 0.2);
-  const gunGeometry = new THREE.BoxGeometry(0.07, 0.09, 0.5);
-  const flashGeometry = new THREE.PlaneGeometry(0.22, 0.22);
   const flashMaterial = new THREE.MeshBasicMaterial({ color: new THREE.Color(PALETTE.accent), transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide });
 
   // Tracer pool: 12 lines reused for every shot, bot or player.
@@ -79,29 +81,128 @@ export function createBots(scene, world, random) {
     return false;
   }
 
+  // One capsule stretched between two points, in the parent's space: the arm
+  // from a shoulder to the rifle grip, or to the foregrip.
+  function limb(a, b, radius, material) {
+    _dir.subVectors(b, a);
+    const len = _dir.length();
+    const geo = new THREE.CapsuleGeometry(radius, Math.max(0.01, len - radius * 2), 4, 8);
+    const mesh = new THREE.Mesh(geo, material);
+    mesh.position.copy(a).add(b).multiplyScalar(0.5);
+    mesh.quaternion.setFromUnitVectors(_up, _dir.normalize());
+    mesh.castShadow = true;
+    return mesh;
+  }
+
+  // Shared humanoid geometry. The leg capsule is translated so its top sits at
+  // the group origin: the leg group hangs at the hip and swings from there.
+  const legGeometry = new THREE.CapsuleGeometry(0.085, 0.58, 4, 8);
+  legGeometry.translate(0, -0.375, 0);
+  const bootGeometry = new THREE.BoxGeometry(0.15, 0.09, 0.26);
+  const torsoGeometry = new THREE.CylinderGeometry(0.27, 0.21, 0.66, 8);
+  const beltGeometry = new THREE.BoxGeometry(0.42, 0.1, 0.28);
+  const vestGeometry = new THREE.BoxGeometry(0.44, 0.38, 0.07);
+  const pouchGeometry = new THREE.BoxGeometry(0.12, 0.14, 0.05);
+  const shoulderGeometry = new THREE.SphereGeometry(0.11, 12, 10);
+  const neckGeometry = new THREE.CylinderGeometry(0.055, 0.065, 0.12, 8);
+  const headGeometry = new THREE.SphereGeometry(0.15, 16, 12);
+  const helmetGeometry = new THREE.SphereGeometry(0.165, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.55);
+  const visorGeometry = new THREE.BoxGeometry(0.2, 0.05, 0.05);
+  const handGeometry = new THREE.SphereGeometry(0.06, 10, 8);
+  const receiverGeometry = new THREE.BoxGeometry(0.07, 0.1, 0.42);
+  const barrelGeometry = new THREE.CylinderGeometry(0.018, 0.018, 0.32, 8);
+  const stockGeometry = new THREE.BoxGeometry(0.06, 0.09, 0.16);
+  const magazineGeometry = new THREE.BoxGeometry(0.05, 0.15, 0.09);
+  const sightGeometry = new THREE.BoxGeometry(0.04, 0.05, 0.1);
+  const flashGeometry = new THREE.PlaneGeometry(0.24, 0.24);
+
   for (let index = 0; index < BOT_SPAWNS.length; index += 1) {
     const spawn = BOT_SPAWNS[index];
     const group = new THREE.Group();
     group.position.set(spawn.x, 0, spawn.z);
 
-    const legL = new THREE.Mesh(legGeometry, darkMaterial);
-    legL.position.set(-0.13, 0.36, 0);
-    const legR = new THREE.Mesh(legGeometry, darkMaterial);
-    legR.position.set(0.13, 0.36, 0);
+    // Legs: a group at each hip, capsule leg plus a boot, swinging from the hip.
+    function makeLeg(side) {
+      const leg = new THREE.Group();
+      leg.position.set(0.13 * side, 0.88, 0);
+      const shin = new THREE.Mesh(legGeometry, darkMaterial);
+      shin.castShadow = true;
+      const boot = new THREE.Mesh(bootGeometry, darkMaterial);
+      boot.position.set(0, -0.72, 0.04);
+      boot.castShadow = true;
+      leg.add(shin, boot);
+      return { leg, shin };
+    }
+    const legL = makeLeg(-1);
+    const legR = makeLeg(1);
+    group.add(legL.leg, legR.leg);
+
+    // Torso: a tapered cylinder, wide at the shoulders and narrow at the waist,
+    // flattened front to back so it reads as a chest, not a post.
     const torso = new THREE.Mesh(torsoGeometry, bodyMaterial);
-    torso.position.y = 1.12;
+    torso.position.y = 1.2;
+    torso.rotation.y = Math.PI / 8;
+    torso.scale.set(1, 1, 0.62);
     torso.userData.part = 'torso';
-    const head = new THREE.Mesh(headGeometry, darkMaterial);
-    head.position.y = 1.68;
+    // Belt, vest and pouches break up the silhouette; shoulder pads round it.
+    const belt = new THREE.Mesh(beltGeometry, darkMaterial);
+    belt.position.y = 0.92;
+    const vest = new THREE.Mesh(vestGeometry, darkMaterial);
+    vest.position.set(0, 1.28, -0.26);
+    const pouchL = new THREE.Mesh(pouchGeometry, darkMaterial);
+    pouchL.position.set(-0.11, 1.22, -0.3);
+    const pouchR = new THREE.Mesh(pouchGeometry, darkMaterial);
+    pouchR.position.set(0.11, 1.22, -0.3);
+    const shoulderL = new THREE.Mesh(shoulderGeometry, bodyMaterial);
+    shoulderL.position.set(-0.27, 1.5, 0);
+    const shoulderR = new THREE.Mesh(shoulderGeometry, bodyMaterial);
+    shoulderR.position.set(0.27, 1.5, 0);
+    // Neck and head: a skin face under a helmet dome, goggles across the eyes.
+    const neck = new THREE.Mesh(neckGeometry, skinMaterial);
+    neck.position.y = 1.58;
+    const head = new THREE.Mesh(headGeometry, skinMaterial);
+    head.position.y = 1.72;
+    head.scale.set(1, 1.15, 1.02);
     head.userData.part = 'head';
-    const visor = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.05, 0.05), visorMaterial);
-    visor.position.set(0, 1.7, -0.14);
-    const gun = new THREE.Mesh(gunGeometry, darkMaterial);
-    gun.position.set(0.2, 1.2, -0.3);
+    const helmet = new THREE.Mesh(helmetGeometry, darkMaterial);
+    helmet.position.y = 1.74;
+    const visor = new THREE.Mesh(visorGeometry, visorMaterial);
+    visor.position.set(0, 1.73, -0.16);
+    group.add(torso, belt, vest, pouchL, pouchR, shoulderL, shoulderR, neck, head, helmet, visor);
+
+    // Arms and rifle on one pivot at the chest: the rifle rises to aim when the
+    // bot engages and lowers to a carry when it patrols. The right hand grips
+    // the rifle, the left hand holds the foregrip, both skinned.
+    const aimGroup = new THREE.Group();
+    aimGroup.position.set(0, 1.42, 0);
+    aimGroup.rotation.x = 0.55;
+    const armR = limb(new THREE.Vector3(0.27, 0.08, 0), new THREE.Vector3(0.13, -0.16, -0.3), 0.055, bodyMaterial);
+    const armL = limb(new THREE.Vector3(-0.27, 0.08, 0), new THREE.Vector3(0.08, -0.14, -0.45), 0.055, bodyMaterial);
+    const handR = new THREE.Mesh(handGeometry, skinMaterial);
+    handR.position.set(0.13, -0.16, -0.3);
+    const handL = new THREE.Mesh(handGeometry, skinMaterial);
+    handL.position.set(0.08, -0.14, -0.45);
+    // Rifle: receiver, barrel, stock, magazine and sight.
+    const gun = new THREE.Group();
+    const receiver = new THREE.Mesh(receiverGeometry, darkMaterial);
+    receiver.position.set(0.1, -0.14, -0.3);
+    const barrel = new THREE.Mesh(barrelGeometry, darkMaterial);
+    barrel.rotation.x = Math.PI / 2;
+    barrel.position.set(0.1, -0.12, -0.66);
+    const stock = new THREE.Mesh(stockGeometry, darkMaterial);
+    stock.position.set(0.1, -0.13, -0.04);
+    const magazine = new THREE.Mesh(magazineGeometry, darkMaterial);
+    magazine.position.set(0.1, -0.24, -0.26);
+    magazine.rotation.x = 0.12;
+    const sight = new THREE.Mesh(sightGeometry, darkMaterial);
+    sight.position.set(0.1, -0.065, -0.32);
+    gun.add(receiver, barrel, stock, magazine, sight);
     const flash = new THREE.Mesh(flashGeometry, flashMaterial.clone());
-    flash.position.set(0.2, 1.22, -0.62);
+    flash.position.set(0.1, -0.12, -0.86);
     flash.visible = false;
-    group.add(legL, legR, torso, head, visor, gun, flash);
+    aimGroup.add(armR, armL, handR, handL, gun, flash);
+    group.add(aimGroup);
+
     group.traverse((mesh) => {
       if (mesh.isMesh) {
         mesh.castShadow = true;
@@ -111,7 +212,8 @@ export function createBots(scene, world, random) {
     scene.add(group);
 
     const item = {
-      index, group, torso, head, gun, flash, legL, legR,
+      index, group, torso, head, gun, flash, aimGroup,
+      legL: legL.leg, legR: legR.leg,
       position: group.position,
       yaw: Math.PI,
       health: HEALTH, alive: true, fall: 0,
@@ -123,7 +225,15 @@ export function createBots(scene, world, random) {
     };
     torso.userData.bot = item;
     head.userData.bot = item;
-    hitMeshes.push(torso, head);
+    legL.shin.userData.bot = item;
+    legR.shin.userData.bot = item;
+    legL.shin.userData.part = 'torso';
+    legR.shin.userData.part = 'torso';
+    armR.userData.bot = item;
+    armL.userData.bot = item;
+    armR.userData.part = 'torso';
+    armL.userData.part = 'torso';
+    hitMeshes.push(torso, head, legL.shin, legR.shin, armR, armL);
     items.push(item);
   }
 
@@ -192,6 +302,9 @@ export function createBots(scene, world, random) {
       bot.defusing = false;
       bot.investigate = null;
       bot.flash.visible = false;
+      bot.aimGroup.rotation.x = 0.55;
+      bot.legL.rotation.x = 0;
+      bot.legR.rotation.x = 0;
     }
   }
 
@@ -278,9 +391,13 @@ export function createBots(scene, world, random) {
         bot.investigate = null;
       }
 
+      // Walk cycle and rifle pose: legs swing from the hips while moving, and
+      // the rifle rises to aim when engaging, lowers to a carry otherwise.
       const swing = Math.sin(bot.walkPhase) * 0.35;
       bot.legL.rotation.x = swing;
       bot.legR.rotation.x = -swing;
+      const aimTarget = bot.state === 'engage' ? 0 : 0.55;
+      bot.aimGroup.rotation.x += (aimTarget - bot.aimGroup.rotation.x) * Math.min(1, dt * 6);
 
       if (bot.state === 'engage') {
         if (!ctx.live) {
@@ -319,7 +436,8 @@ export function createBots(scene, world, random) {
         let chance = 0.55 - distance * 0.011 - ctx.playerSpeed * 0.05 + (ctx.playerCrouching ? 0.08 : 0);
         chance = Math.max(0.08, Math.min(0.7, chance));
         const hit = random() < chance;
-        _from.set(bot.position.x + Math.sin(bot.yaw) * -0.2, 1.22, bot.position.z + Math.cos(bot.yaw) * -0.2);
+        // Tracer starts at the rifle muzzle, not the chest.
+        _from.set(bot.position.x - Math.sin(bot.yaw) * 0.86, 1.3, bot.position.z - Math.cos(bot.yaw) * 0.86);
         if (hit) {
           _to.set(ctx.playerPos.x, ctx.playerPos.y + 1.2, ctx.playerPos.z);
           ctx.onPlayerDamage(11 + Math.floor(random() * 6), bot.position);
